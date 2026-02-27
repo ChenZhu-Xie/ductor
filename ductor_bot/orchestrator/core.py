@@ -188,14 +188,19 @@ class Orchestrator:
         return self._paths
 
     @classmethod
-    async def create(cls, config: AgentConfig) -> Orchestrator:
+    async def create(
+        cls, config: AgentConfig, *, agent_name: str = "main",
+    ) -> Orchestrator:
         """Async factory: build Orchestrator.
 
         Workspace must already be initialized by the caller (``__main__.load_config``).
         """
         paths = resolve_paths(ductor_home=config.ductor_home)
 
-        os.environ["DUCTOR_HOME"] = str(paths.ductor_home)
+        # Only set the process-wide env var for the main agent to avoid
+        # race conditions in multi-agent mode (sub-agents use per-subprocess env).
+        if agent_name == "main":
+            os.environ["DUCTOR_HOME"] = str(paths.ductor_home)
 
         docker_container = ""
         docker_mgr: DockerManager | None = None
@@ -214,7 +219,7 @@ class Orchestrator:
             inject_runtime_environment, paths, docker_container=docker_container
         )
 
-        orch = cls(config, paths, docker_container=docker_container)
+        orch = cls(config, paths, docker_container=docker_container, agent_name=agent_name)
         orch._docker = docker_mgr
 
         from ductor_bot.cli.auth import AuthStatus, check_all_auth
@@ -508,7 +513,9 @@ class Orchestrator:
 
         reg = self._command_registry
         reg.register_async("/agents", cmd_agents)
+        reg.register_async("/agent_start", cmd_agent_start)
         reg.register_async("/agent_start ", cmd_agent_start)
+        reg.register_async("/agent_stop", cmd_agent_stop)
         reg.register_async("/agent_stop ", cmd_agent_stop)
         logger.info("Multi-agent commands registered")
 

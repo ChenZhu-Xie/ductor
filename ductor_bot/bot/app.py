@@ -49,7 +49,7 @@ from ductor_bot.bot.welcome import (
     is_welcome_callback,
     resolve_welcome_callback,
 )
-from ductor_bot.commands import BOT_COMMANDS as _COMMAND_DEFS
+from ductor_bot.commands import BOT_COMMANDS as _COMMAND_DEFS, MULTIAGENT_COMMANDS as _MA_DEFS
 from ductor_bot.config import AgentConfig
 from ductor_bot.files.allowed_roots import resolve_allowed_roots
 from ductor_bot.infra.restart import EXIT_RESTART, consume_restart_marker, consume_restart_sentinel
@@ -80,8 +80,9 @@ TypingContext = _TypingContext
 send_files_from_text = _send_files_from_text
 
 _BOT_COMMANDS = [BotCommand(command=cmd, description=desc) for cmd, desc in _COMMAND_DEFS]
+_MA_BOT_COMMANDS = [BotCommand(command=cmd, description=desc) for cmd, desc in _MA_DEFS]
 
-_CMD_DESC: dict[str, str] = dict(_COMMAND_DEFS)
+_CMD_DESC: dict[str, str] = {**dict(_COMMAND_DEFS), **dict(_MA_DEFS)}
 
 
 def _help_line(command: str) -> str:
@@ -133,8 +134,9 @@ async def _cancel_task(task: asyncio.Task[None] | None) -> None:
 class TelegramBot:
     """Telegram frontend. All logic lives in the Orchestrator."""
 
-    def __init__(self, config: AgentConfig) -> None:
+    def __init__(self, config: AgentConfig, *, agent_name: str = "main") -> None:
         self._config = config
+        self._agent_name = agent_name
         self._orchestrator: Orchestrator | None = None
 
         self._bot = Bot(
@@ -183,7 +185,9 @@ class TelegramBot:
     async def _on_startup(self) -> None:
         from ductor_bot.orchestrator.core import Orchestrator
 
-        self._orchestrator = await Orchestrator.create(self._config)
+        self._orchestrator = await Orchestrator.create(
+            self._config, agent_name=self._agent_name,
+        )
 
         me = await self._bot.get_me()
         self._bot_id = me.id
@@ -241,8 +245,10 @@ class TelegramBot:
         r.message(Command("session"))(self._on_session)
         r.message(Command("sessions"))(self._on_sessions)
         r.message(Command("showfiles"))(self._on_showfiles)
-        for cmd in ("status", "memory", "model", "cron", "diagnose", "upgrade",
-                    "agents", "agent_start", "agent_stop"):
+        base_cmds = ["status", "memory", "model", "cron", "diagnose", "upgrade"]
+        if self._agent_name == "main":
+            base_cmds += ["agents", "agent_start", "agent_stop"]
+        for cmd in base_cmds:
             r.message(Command(cmd))(self._on_command)
         r.message()(self._on_message)
         r.callback_query()(self._on_callback_query)
@@ -1225,12 +1231,13 @@ class TelegramBot:
         )
 
     async def _sync_commands(self) -> None:
+        desired = _BOT_COMMANDS + _MA_BOT_COMMANDS if self._agent_name == "main" else _BOT_COMMANDS
         current = await self._bot.get_my_commands()
         current_set = {(c.command, c.description) for c in current}
-        desired_set = {(c.command, c.description) for c in _BOT_COMMANDS}
+        desired_set = {(c.command, c.description) for c in desired}
         if current_set != desired_set:
-            await self._bot.set_my_commands(_BOT_COMMANDS)
-            logger.info("Updated %d bot commands", len(_BOT_COMMANDS))
+            await self._bot.set_my_commands(desired)
+            logger.info("Updated %d bot commands", len(desired))
 
     async def _watch_restart_marker(self) -> None:
         """Poll for restart-requested marker file."""

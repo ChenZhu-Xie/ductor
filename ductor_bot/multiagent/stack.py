@@ -50,7 +50,7 @@ class AgentStack:
 
         from ductor_bot.bot.app import TelegramBot
 
-        bot = TelegramBot(config)
+        bot = TelegramBot(config, agent_name=name)
         logger.info(
             "AgentStack created: name=%s home=%s main=%s",
             name,

@@ -17,6 +17,10 @@ BOT_COMMANDS: list[tuple[str, str]] = [
     ("showfiles", "Browse ductor files"),
     ("diagnose", "Show system diagnostics"),
     ("help", "Show all commands"),
+]
+
+# Commands only available on the main agent (multi-agent management).
+MULTIAGENT_COMMANDS: list[tuple[str, str]] = [
     ("agents", "List all agents"),
     ("agent_start", "Start a sub-agent"),
     ("agent_stop", "Stop a sub-agent"),
