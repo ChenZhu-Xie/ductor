@@ -382,9 +382,10 @@ def _print_usage() -> None:
     svc_hint = "Task Scheduler" if _IS_WINDOWS else ("launchd" if is_macos else "systemd")
     table.add_row("ductor service install", f"Run as background service ({svc_hint})")
     table.add_row("ductor service", "Service management (status/stop/logs/...)")
+    table.add_row("ductor agents", "Sub-agent management (list/add/remove)")
     table.add_row("ductor docker", "Docker management (rebuild/enable/disable)")
     table.add_row("ductor api", "API server management (enable/disable) [beta]")
-    table.add_row("ductor status", "Show bot status, paths, and stats")
+    table.add_row("ductor status", "Show bot status, paths, and agents")
     table.add_row("ductor help", "Show this message")
     table.add_row("-v, --verbose", "Verbose logging output")
 
@@ -449,8 +450,20 @@ def _build_status_lines(status: _StatusSummary, *, paths: DuctorPaths) -> list[s
     return lines
 
 
+def _load_agents_registry(paths: DuctorPaths) -> list[dict[str, object]]:
+    """Load sub-agent definitions from agents.json (raw dicts)."""
+    agents_path = paths.ductor_home / "agents.json"
+    if not agents_path.is_file():
+        return []
+    try:
+        raw = json.loads(agents_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    return raw if isinstance(raw, list) else []
+
+
 def _print_status() -> None:
-    """Print bot status, paths, and runtime info."""
+    """Print bot status, paths, and runtime info including sub-agents."""
     paths = resolve_paths()
     try:
         data: dict[str, object] = json.loads(
@@ -507,11 +520,16 @@ def _print_status() -> None:
     _console.print(
         Panel(
             "\n".join(lines),
-            title="[bold]Status[/bold]",
+            title="[bold]Status — main[/bold]",
             border_style="green",
             padding=(1, 2),
         ),
     )
+
+    # Show sub-agents
+    agents = _load_agents_registry(paths)
+    if agents:
+        _print_agents_status(agents, paths)
 
 
 def _count_log_errors(log_dir: Path) -> int:
@@ -529,6 +547,219 @@ def _count_log_errors(log_dir: Path) -> int:
         return log_files[0].read_text(encoding="utf-8", errors="replace").count(" ERROR ")
     except OSError:
         return 0
+
+
+def _print_agents_status(agents: list[dict[str, object]], paths: DuctorPaths) -> None:
+    """Print a status table for all sub-agents."""
+    table = Table(show_header=True, box=None, padding=(0, 2))
+    table.add_column("Agent", style="bold")
+    table.add_column("Provider")
+    table.add_column("Model")
+    table.add_column("Home")
+
+    for agent in agents:
+        name = str(agent.get("name", "?"))
+        prov = str(agent.get("provider", "inherited"))
+        mdl = str(agent.get("model", "inherited"))
+        home = paths.ductor_home / "agents" / name
+        home_str = f"[cyan]{home}[/cyan]" if home.is_dir() else f"[dim]{home}[/dim]"
+        table.add_row(name, prov, mdl, home_str)
+
+    _console.print(
+        Panel(
+            table,
+            title=f"[bold]Sub-Agents ({len(agents)})[/bold]",
+            border_style="blue",
+            padding=(1, 0),
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Agent management (ductor agents)
+# ---------------------------------------------------------------------------
+
+_AGENTS_SUBCOMMANDS = frozenset({"list", "add", "remove"})
+
+
+def _parse_agents_subcommand(args: list[str]) -> tuple[str | None, list[str]]:
+    """Extract the subcommand and remaining args after 'agents'."""
+    found = False
+    sub: str | None = None
+    rest: list[str] = []
+    for a in args:
+        if a.startswith("-"):
+            continue
+        if not found and a == "agents":
+            found = True
+            continue
+        if found and sub is None:
+            sub = a if a in _AGENTS_SUBCOMMANDS else None
+            if sub is None:
+                # Unknown subcommand — show help
+                return None, []
+            continue
+        if found and sub is not None:
+            rest.append(a)
+    if found and sub is None:
+        # bare "ductor agents" → default to list
+        return "list", []
+    return sub, rest
+
+
+def _print_agents_help() -> None:
+    """Print the agents subcommand help table."""
+    _console.print()
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column(style="bold green", min_width=36)
+    table.add_column()
+    table.add_row("ductor agents", "List all sub-agents and their config")
+    table.add_row("ductor agents list", "List all sub-agents and their config")
+    table.add_row("ductor agents add <name>", "Add a new sub-agent (interactive)")
+    table.add_row("ductor agents remove <name>", "Remove a sub-agent")
+    _console.print(
+        Panel(table, title="[bold]Agent Commands[/bold]", border_style="blue", padding=(1, 0)),
+    )
+    _console.print()
+
+
+def _agents_list() -> None:
+    """List all sub-agents from agents.json."""
+    paths = resolve_paths()
+    agents = _load_agents_registry(paths)
+    if not agents:
+        _console.print("[dim]No sub-agents configured.[/dim]")
+        _console.print("[dim]Use 'ductor agents add <name>' to create one.[/dim]")
+        return
+    _print_agents_status(agents, paths)
+
+
+def _agents_add(rest: list[str]) -> None:
+    """Add a new sub-agent interactively."""
+    import questionary
+
+    name = rest[0] if rest else None
+    if not name:
+        _console.print("[bold red]Usage: ductor agents add <name>[/bold red]")
+        return
+
+    name = name.lower().strip()
+    if name == "main":
+        _console.print("[bold red]Name 'main' is reserved.[/bold red]")
+        return
+
+    paths = resolve_paths()
+    agents = _load_agents_registry(paths)
+    if any(str(a.get("name", "")).lower() == name for a in agents):
+        _console.print(f"[bold red]Agent '{name}' already exists.[/bold red]")
+        return
+
+    token: str | None = questionary.text(
+        f"Telegram bot token for '{name}':",
+    ).ask()
+    if not token or not token.strip():
+        _console.print("[dim]Cancelled.[/dim]")
+        return
+
+    users_raw: str | None = questionary.text(
+        "Allowed user IDs (comma-separated):",
+    ).ask()
+    if users_raw is None:
+        _console.print("[dim]Cancelled.[/dim]")
+        return
+
+    user_ids: list[int] = []
+    for part in users_raw.split(","):
+        part = part.strip()
+        if part.isdigit():
+            user_ids.append(int(part))
+
+    provider: str | None = questionary.select(
+        "Provider:",
+        choices=["claude", "codex", "gemini"],
+        default="claude",
+    ).ask()
+    if provider is None:
+        _console.print("[dim]Cancelled.[/dim]")
+        return
+
+    model: str | None = questionary.text(
+        "Model (e.g. opus, sonnet, o3):",
+        default="sonnet",
+    ).ask()
+    if model is None:
+        _console.print("[dim]Cancelled.[/dim]")
+        return
+
+    new_agent: dict[str, object] = {
+        "name": name,
+        "telegram_token": token.strip(),
+        "allowed_user_ids": user_ids,
+        "provider": provider,
+        "model": model.strip(),
+    }
+    agents.append(new_agent)
+
+    agents_path = paths.ductor_home / "agents.json"
+    agents_path.write_text(
+        json.dumps(agents, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    _console.print(f"[green]Agent '{name}' added to agents.json.[/green]")
+    _console.print("[dim]It will be started automatically on next bot (re)start.[/dim]")
+
+
+def _agents_remove(rest: list[str]) -> None:
+    """Remove a sub-agent from agents.json."""
+    import questionary
+
+    name = rest[0] if rest else None
+    if not name:
+        _console.print("[bold red]Usage: ductor agents remove <name>[/bold red]")
+        return
+
+    name = name.lower().strip()
+    paths = resolve_paths()
+    agents = _load_agents_registry(paths)
+    match = [a for a in agents if str(a.get("name", "")).lower() == name]
+    if not match:
+        _console.print(f"[bold red]Agent '{name}' not found.[/bold red]")
+        return
+
+    confirmed: bool | None = questionary.confirm(
+        f"Remove agent '{name}'? (This does not delete its workspace data.)",
+        default=False,
+    ).ask()
+    if not confirmed:
+        _console.print("[dim]Cancelled.[/dim]")
+        return
+
+    remaining = [a for a in agents if str(a.get("name", "")).lower() != name]
+    agents_path = paths.ductor_home / "agents.json"
+    agents_path.write_text(
+        json.dumps(remaining, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    _console.print(f"[green]Agent '{name}' removed from agents.json.[/green]")
+    _console.print(f"[dim]Workspace data remains at {paths.ductor_home / 'agents' / name}[/dim]")
+
+
+def _cmd_agents(args: list[str]) -> None:
+    """Handle 'ductor agents [subcommand]'."""
+    sub, rest = _parse_agents_subcommand(args)
+    if sub is None:
+        _print_agents_help()
+        return
+
+    _console.print()
+    if sub == "list":
+        _agents_list()
+    elif sub == "add":
+        _agents_add(rest)
+    elif sub == "remove":
+        _agents_remove(rest)
+    _console.print()
 
 
 # ---------------------------------------------------------------------------
@@ -742,6 +973,7 @@ _COMMANDS: dict[str, str] = {
     "service": "service",
     "docker": "docker",
     "api": "api",
+    "agents": "agents",
 }
 
 _SERVICE_SUBCOMMANDS = frozenset({"install", "status", "stop", "start", "logs", "uninstall"})
@@ -1335,6 +1567,7 @@ def main() -> None:
         "service": lambda: _cmd_service(args),
         "docker": lambda: _cmd_docker(args),
         "api": lambda: _cmd_api(args),
+        "agents": lambda: _cmd_agents(args),
     }
 
     handler = dispatch.get(action) if action else None
