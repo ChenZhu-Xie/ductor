@@ -913,17 +913,25 @@ class Orchestrator:
         return self._config.allowed_user_ids[0] if self._config.allowed_user_ids else 0
 
     def _get_or_create_interagent_session(
-        self, sender: str
+        self, sender: str, *, new_session: bool = False,
     ) -> tuple[NamedSession, bool]:
         """Get or create a Named Session for an inter-agent conversation.
 
         Uses a deterministic name ``ia-{sender}`` so follow-up messages from
         the same sender automatically resume the same session.
 
+        If *new_session* is True, any existing session for this sender is
+        ended first so a fresh one is created.
+
         Returns ``(session, is_new)``.
         """
         chat_id = self._interagent_chat_id()
         session_name = f"ia-{sender}"
+
+        if new_session:
+            if self._named_sessions.end_session(chat_id, session_name):
+                logger.info("Inter-agent session reset: %s (sender=%s)", session_name, sender)
+
         ns = self._named_sessions.get(chat_id, session_name)
         if ns is not None and ns.status != "ended":
             return ns, False
@@ -945,7 +953,7 @@ class Orchestrator:
         return ns, True
 
     async def handle_interagent_message(
-        self, sender: str, message: str
+        self, sender: str, message: str, *, new_session: bool = False,
     ) -> tuple[str, str]:
         """Process a message from another agent via the InterAgentBus.
 
@@ -959,7 +967,7 @@ class Orchestrator:
 
         own_name = self._cli_service._config.agent_name
         chat_id = self._interagent_chat_id()
-        ns, _is_new = self._get_or_create_interagent_session(sender)
+        ns, _is_new = self._get_or_create_interagent_session(sender, new_session=new_session)
 
         prompt = (
             f"[INTER-AGENT MESSAGE from '{sender}' to '{own_name}']\n"

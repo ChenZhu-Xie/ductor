@@ -81,7 +81,7 @@ class TestBusSyncSend:
         bus = InterAgentBus()
         stack = _make_stack()
 
-        async def slow_handler(_sender: str, _msg: str) -> tuple[str, str]:
+        async def slow_handler(_sender: str, _msg: str, **_kw: object) -> tuple[str, str]:
             await asyncio.sleep(10)
             return "too late", "ia-sender"
 
@@ -168,7 +168,7 @@ class TestBusAsyncSend:
         bus = InterAgentBus()
         stack = _make_stack()
 
-        async def slow_handler(_sender: str, _msg: str) -> tuple[str, str]:
+        async def slow_handler(_sender: str, _msg: str, **_kw: object) -> tuple[str, str]:
             await asyncio.sleep(999)
             return "never", "ia-sender"
 
@@ -193,7 +193,7 @@ class TestBusCancelAllAsync:
         bus = InterAgentBus()
         stack = _make_stack()
 
-        async def slow(_s: str, _m: str) -> tuple[str, str]:
+        async def slow(_s: str, _m: str, **_kw: object) -> tuple[str, str]:
             await asyncio.sleep(999)
             return "", "ia-sender"
 

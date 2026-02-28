@@ -97,6 +97,7 @@ class InternalAgentAPI:
         sender = data.get("from", "")
         recipient = data.get("to", "")
         message = data.get("message", "")
+        new_session = bool(data.get("new_session", False))
 
         if not recipient or not message:
             return web.json_response(
@@ -108,6 +109,7 @@ class InternalAgentAPI:
             sender=sender,
             recipient=recipient,
             message=message,
+            new_session=new_session,
         )
         return web.json_response(asdict(result))
 
@@ -128,6 +130,7 @@ class InternalAgentAPI:
         sender = data.get("from", "")
         recipient = data.get("to", "")
         message = data.get("message", "")
+        new_session = bool(data.get("new_session", False))
 
         if not recipient or not message:
             return web.json_response(
@@ -146,6 +149,7 @@ class InternalAgentAPI:
             sender=sender,
             recipient=recipient,
             message=message,
+            new_session=new_session,
         )
         if task_id is None:
             return web.json_response(

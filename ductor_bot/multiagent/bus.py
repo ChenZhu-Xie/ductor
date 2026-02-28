@@ -48,6 +48,7 @@ class AsyncInterAgentTask:
     sender: str
     recipient: str
     message: str
+    new_session: bool = False
     timestamp: float = field(default_factory=time.time)
     asyncio_task: asyncio.Task[None] | None = field(default=None, repr=False)
 
@@ -104,6 +105,7 @@ class InterAgentBus:
         message: str,
         *,
         send_timeout: float = _DEFAULT_TIMEOUT,
+        new_session: bool = False,
     ) -> InterAgentResponse:
         """Send a message to another agent and wait for the response.
 
@@ -140,7 +142,9 @@ class InterAgentBus:
                 )
 
             result_text, _session_name = await asyncio.wait_for(
-                orch.handle_interagent_message(sender, message),
+                orch.handle_interagent_message(
+                    sender, message, new_session=new_session,
+                ),
                 timeout=send_timeout,
             )
             logger.info(
@@ -183,12 +187,17 @@ class InterAgentBus:
         sender: str,
         recipient: str,
         message: str,
+        *,
+        new_session: bool = False,
     ) -> str | None:
         """Send a message to another agent asynchronously.
 
         Returns a task_id immediately. The response will be delivered to the
         sender agent's registered callback when the target agent finishes.
         Returns None if the recipient is not found.
+
+        If *new_session* is True, the recipient agent will end any existing
+        inter-agent session with this sender and start a fresh one.
         """
         if recipient not in self._agents:
             return None
@@ -199,6 +208,7 @@ class InterAgentBus:
             sender=sender,
             recipient=recipient,
             message=message,
+            new_session=new_session,
         )
         atask = asyncio.create_task(
             self._run_async(task),
@@ -247,7 +257,9 @@ class InterAgentBus:
             await self._notify_recipient(task)
 
             result_text, session_name = await asyncio.wait_for(
-                orch.handle_interagent_message(task.sender, task.message),
+                orch.handle_interagent_message(
+                    task.sender, task.message, new_session=task.new_session,
+                ),
                 timeout=_ASYNC_TIMEOUT,
             )
             logger.info(
