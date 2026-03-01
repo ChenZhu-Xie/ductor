@@ -66,7 +66,7 @@ async def cmd_agent_stop(orch: Orchestrator, _chat_id: int, text: str) -> Orches
 
     parts = text.split(None, 1)
     if len(parts) < 2:
-        return OrchestratorResult(text="Usage: /agent\\_stop <name>")
+        return OrchestratorResult(text="Usage: /agent_stop <name>")
 
     name = parts[1].strip().lower()
     if name == "main":
@@ -87,7 +87,7 @@ async def cmd_agent_start(orch: Orchestrator, _chat_id: int, text: str) -> Orche
 
     parts = text.split(None, 1)
     if len(parts) < 2:
-        return OrchestratorResult(text="Usage: /agent\\_start <name>")
+        return OrchestratorResult(text="Usage: /agent_start <name>")
 
     name = parts[1].strip().lower()
     result = await supervisor.start_agent_by_name(name)
@@ -102,7 +102,7 @@ async def cmd_agent_restart(orch: Orchestrator, _chat_id: int, text: str) -> Orc
 
     parts = text.split(None, 1)
     if len(parts) < 2:
-        return OrchestratorResult(text="Usage: /agent\\_restart <name>")
+        return OrchestratorResult(text="Usage: /agent_restart <name>")
 
     name = parts[1].strip().lower()
     result = await supervisor.restart_agent(name)
