@@ -198,6 +198,18 @@ class TaskRegistry:
                 to_remove.append(task_id)
         return self._remove_entries(to_remove, "cleanup_old")
 
+    def delete(self, task_id: str) -> bool:
+        """Delete a single finished task (entry + folder).
+
+        Only tasks with status done/failed/cancelled can be deleted.
+        Returns ``True`` if deleted, ``False`` if not found or not deletable.
+        """
+        entry = self._entries.get(task_id)
+        if entry is None or entry.status not in _FINISHED_STATUSES:
+            return False
+        self._remove_entries([task_id], "delete")
+        return True
+
     def cleanup_finished(self, chat_id: int | None = None) -> int:
         """Remove all finished tasks (done/failed/cancelled) regardless of age."""
         to_remove: list[str] = []
@@ -211,9 +223,12 @@ class TaskRegistry:
 
     def _remove_entries(self, task_ids: list[str], label: str) -> int:
         """Delete entries and their folders from the registry."""
+        # Resolve folder paths before deleting entries (entries carry per-agent
+        # tasks_dir overrides that task_folder() needs).
+        folders = {tid: self.task_folder(tid) for tid in task_ids}
         for task_id in task_ids:
             del self._entries[task_id]
-            folder = self.task_folder(task_id)
+            folder = folders[task_id]
             if folder.is_dir():
                 shutil.rmtree(folder, ignore_errors=True)
         if task_ids:
@@ -246,6 +261,7 @@ After asking, finish your current work — you will be resumed with the answer.
 
 - `python3 tools/task_tools/list_tasks.py` — List active tasks
 - `python3 tools/task_tools/cancel_task.py TASK_ID` — Cancel a task
+- `python3 tools/task_tools/delete_task.py TASK_ID` — Delete a finished task
 
 ## TASKMEMORY.md
 

@@ -67,6 +67,7 @@ class InternalAgentAPI:
         self._app.router.add_post("/tasks/ask_parent", self._handle_task_ask_parent)
         self._app.router.add_get("/tasks/list", self._handle_task_list)
         self._app.router.add_post("/tasks/cancel", self._handle_task_cancel)
+        self._app.router.add_post("/tasks/delete", self._handle_task_delete)
 
         self._runner: web.AppRunner | None = None
 
@@ -394,3 +395,48 @@ class InternalAgentAPI:
 
         cancelled = await self._task_hub.cancel(task_id)
         return web.json_response({"success": cancelled})
+
+    async def _handle_task_delete(  # noqa: PLR0911
+        self, request: web.Request
+    ) -> web.Response:
+        """POST /tasks/delete — permanently delete a finished task (entry + folder)."""
+        if self._task_hub is None:
+            return web.json_response(
+                {"success": False, "error": "Task system not available"},
+                status=503,
+            )
+
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response(
+                {"success": False, "error": "Invalid JSON body"},
+                status=400,
+            )
+
+        task_id = data.get("task_id", "")
+        sender = data.get("from", "")
+        if not task_id:
+            return web.json_response(
+                {"success": False, "error": "Missing 'task_id' field"},
+                status=400,
+            )
+
+        entry = self._task_hub.registry.get(task_id)
+        if entry is None:
+            return web.json_response(
+                {"success": False, "error": f"Task '{task_id}' not found"},
+                status=404,
+            )
+        if sender and entry.parent_agent != sender:
+            return web.json_response(
+                {"success": False, "error": "Not authorized to delete this task"},
+                status=403,
+            )
+
+        if not self._task_hub.registry.delete(task_id):
+            return web.json_response(
+                {"success": False, "error": "Task is still running or waiting"},
+                status=409,
+            )
+        return web.json_response({"success": True})

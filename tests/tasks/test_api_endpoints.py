@@ -37,7 +37,7 @@ async def api_client(aiohttp_client: object) -> TestClient:
     api = InternalAgentAPI(bus=None, port=0)
     hub = _make_task_hub()
     api.set_task_hub(hub)
-    api._hub_for_test = hub  # Stash for test access
+    api._app["_test_hub"] = hub  # Stash for test access
     return await aiohttp_client(api._app)  # type: ignore[return-value]
 
 
@@ -96,6 +96,61 @@ class TestTaskCancel:
 
     async def test_missing_task_id(self, api_client: TestClient) -> None:
         resp = await api_client.post("/tasks/cancel", json={})
+        assert resp.status == 400
+
+
+class TestTaskDelete:
+    async def test_deletes_finished_task(self, api_client: TestClient) -> None:
+        hub = api_client.app["_test_hub"]
+        entry = MagicMock()
+        entry.parent_agent = "main"
+        entry.status = "done"
+        hub.registry.get.return_value = entry
+        hub.registry.delete.return_value = True
+
+        resp = await api_client.post(
+            "/tasks/delete",
+            json={"task_id": "abc", "from": "main"},
+        )
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["success"] is True
+
+    async def test_rejects_running_task(self, api_client: TestClient) -> None:
+        hub = api_client.app["_test_hub"]
+        entry = MagicMock()
+        entry.parent_agent = "main"
+        entry.status = "running"
+        hub.registry.get.return_value = entry
+        hub.registry.delete.return_value = False
+
+        resp = await api_client.post(
+            "/tasks/delete",
+            json={"task_id": "abc", "from": "main"},
+        )
+        assert resp.status == 409
+
+    async def test_not_found(self, api_client: TestClient) -> None:
+        hub = api_client.app["_test_hub"]
+        hub.registry.get.return_value = None
+
+        resp = await api_client.post("/tasks/delete", json={"task_id": "nope"})
+        assert resp.status == 404
+
+    async def test_unauthorized(self, api_client: TestClient) -> None:
+        hub = api_client.app["_test_hub"]
+        entry = MagicMock()
+        entry.parent_agent = "main"
+        hub.registry.get.return_value = entry
+
+        resp = await api_client.post(
+            "/tasks/delete",
+            json={"task_id": "abc", "from": "other_agent"},
+        )
+        assert resp.status == 403
+
+    async def test_missing_task_id(self, api_client: TestClient) -> None:
+        resp = await api_client.post("/tasks/delete", json={})
         assert resp.status == 400
 
 

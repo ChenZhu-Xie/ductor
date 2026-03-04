@@ -160,6 +160,48 @@ class TestCleanupFinished:
         assert registry.cleanup_finished() == 0
 
 
+class TestDelete:
+    def test_deletes_finished_task(self, registry: TaskRegistry, tmp_path: Path) -> None:
+        entry = registry.create(_submit(name="Deletable"), "claude", "opus")
+        folder = registry.task_folder(entry.task_id)
+        assert folder.is_dir()
+
+        registry.update_status(entry.task_id, "done")
+        assert registry.delete(entry.task_id) is True
+        assert registry.get(entry.task_id) is None
+        assert not folder.exists()
+
+    def test_rejects_running_task(self, registry: TaskRegistry) -> None:
+        entry = registry.create(_submit(name="Active"), "claude", "opus")
+        assert registry.delete(entry.task_id) is False
+        assert registry.get(entry.task_id) is not None
+
+    def test_rejects_waiting_task(self, registry: TaskRegistry) -> None:
+        entry = registry.create(_submit(name="Waiting"), "claude", "opus")
+        registry.update_status(entry.task_id, "waiting")
+        assert registry.delete(entry.task_id) is False
+
+    def test_returns_false_for_missing(self, registry: TaskRegistry) -> None:
+        assert registry.delete("nonexistent") is False
+
+    def test_deletes_all_finished_statuses(self, registry: TaskRegistry) -> None:
+        for status in ("done", "failed", "cancelled"):
+            entry = registry.create(_submit(name=status), "claude", "opus")
+            registry.update_status(entry.task_id, status)
+            assert registry.delete(entry.task_id) is True
+
+    def test_deletes_subagent_task_folder(self, registry: TaskRegistry, tmp_path: Path) -> None:
+        agent_dir = tmp_path / "agents" / "sub1" / "workspace" / "tasks"
+        entry = registry.create(_submit(name="SubTask"), "codex", "gpt-5.2", tasks_dir=agent_dir)
+        folder = registry.task_folder(entry.task_id)
+        assert str(agent_dir) in str(folder)
+        assert folder.is_dir()
+
+        registry.update_status(entry.task_id, "done")
+        assert registry.delete(entry.task_id) is True
+        assert not folder.exists()
+
+
 class TestLoadRecovery:
     def test_downgrades_stale_running(self, registry: TaskRegistry, tmp_path: Path) -> None:
         entry = registry.create(_submit(), "claude", "opus")
