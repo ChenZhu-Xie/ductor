@@ -600,6 +600,34 @@ class MatrixBot:
         self._track_sent_event(event_id)
         return event_id
 
+    # --- Join notification ---
+
+    async def _send_join_notification(self, room_id: str) -> None:
+        """Send JOIN_NOTIFICATION.md content and try to pin it."""
+        if not self._orchestrator:
+            return
+        path = self._orchestrator.paths.join_notification_path
+        if not path.is_file():
+            return
+        text = path.read_text(encoding="utf-8").strip()
+        if not text:
+            return
+        event_id = await self._send_rich(room_id, text)
+        if event_id:
+            try:
+                from nio import RoomPutStateError
+
+                resp = await self._client.room_put_state(
+                    room_id=room_id,
+                    event_type="m.room.pinned_events",
+                    content={"pinned": [event_id]},
+                    state_key="",
+                )
+                if isinstance(resp, RoomPutStateError):
+                    logger.warning("Could not pin join notification in %s: %s", room_id, resp.message)
+            except Exception:
+                logger.warning("Failed to pin join notification in %s", room_id, exc_info=True)
+
     # --- Room invite handling ---
 
     async def _on_invite(self, room: object, event: object) -> None:
@@ -608,6 +636,8 @@ class MatrixBot:
         if not self._allowed_rooms_set or room_id in self._allowed_rooms_set:
             await self._client.join(room_id)
             logger.info("Auto-joined room: %s", room_id)
+            self._last_active_room = room_id
+            await self._send_join_notification(room_id)
         elif self._allowed_rooms_set:
             # Unauthorized room — join briefly to send rejection, then leave
             self._leaving_rooms.add(room_id)
@@ -717,6 +747,12 @@ class MatrixBot:
                 break
 
     async def broadcast(self, text: str) -> None:
-        """Send a message to all allowed rooms."""
-        for room_id in self._config.matrix.allowed_rooms:
+        """Send a message to all allowed rooms (falls back to last active room)."""
+        rooms = list(self._config.matrix.allowed_rooms)
+        if not rooms and self._last_active_room:
+            rooms = [self._last_active_room]
+        if not rooms:
+            logger.warning("broadcast: no rooms available, message lost: %s", text[:80])
+            return
+        for room_id in rooms:
             await self._send_rich(room_id, text)

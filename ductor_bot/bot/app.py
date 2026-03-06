@@ -348,6 +348,8 @@ class TelegramBot:
             if self._chat_tracker:
                 self._chat_tracker.record_leave(chat.id, "auto_left")
             logger.info("Auto-left unauthorized group chat_id=%d title=%s", chat.id, chat.title)
+            return
+        await self._send_join_notification(chat.id)
 
     async def _on_bot_removed(self, event: ChatMemberUpdated) -> None:
         """Bot was removed from a group."""
@@ -356,6 +358,25 @@ class TelegramBot:
         if self._chat_tracker:
             self._chat_tracker.record_leave(chat.id, status)
         logger.info("Bot removed from group chat_id=%d status=%s", chat.id, status)
+
+    async def _send_join_notification(self, chat_id: int) -> None:
+        """Send JOIN_NOTIFICATION.md content and try to pin it."""
+        if not self._orchestrator:
+            return
+        path = self._orch.paths.join_notification_path
+        if not path.is_file():
+            return
+        text = path.read_text(encoding="utf-8").strip()
+        if not text:
+            return
+        from ductor_bot.bot.sender import _send_text_chunks
+
+        msg = await _send_text_chunks(self._bot, chat_id, text)
+        if msg:
+            with contextlib.suppress(TelegramAPIError):
+                await self._bot.pin_chat_message(
+                    chat_id, msg.message_id, disable_notification=True
+                )
 
     _GROUP_AUDIT_INTERVAL = 86400  # 24 hours
 
@@ -567,6 +588,7 @@ class TelegramBot:
     async def _on_start(self, message: Message) -> None:
         """Handle /start: always show welcome screen."""
         await self._show_welcome(message)
+        await self._send_join_notification(message.chat.id)
 
     async def _on_help(self, message: Message) -> None:
         """Handle /help: show command reference."""

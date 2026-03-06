@@ -128,6 +128,11 @@ def main() -> None:
         default=None,
         help="Specific model name (e.g. gpt-5.3-codex, opus, gemini-2.5-pro)",
     )
+    parser.add_argument(
+        "--description",
+        default=None,
+        help="Short agent description for the join notification (purpose, key commands)",
+    )
     args = parser.parse_args()
 
     # Validate name
@@ -185,6 +190,14 @@ def main() -> None:
     # Write
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(agents, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    # Write JOIN_NOTIFICATION.md if description provided
+    if args.description:
+        agent_workspace = _main_home() / "agents" / name / "workspace"
+        agent_workspace.mkdir(parents=True, exist_ok=True)
+        notification_path = agent_workspace / "JOIN_NOTIFICATION.md"
+        notification_path.write_text(args.description + "\n", encoding="utf-8")
+        print(f"  JOIN_NOTIFICATION.md written.")
 
     print(f"Agent '{name}' created successfully.")
     print(f"  Token: {args.token[:8]}...")

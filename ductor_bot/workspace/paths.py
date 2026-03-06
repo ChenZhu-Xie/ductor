@@ -139,6 +139,10 @@ class DuctorPaths:
     def mainmemory_path(self) -> Path:
         return self.memory_system_dir / "MAINMEMORY.md"
 
+    @property
+    def join_notification_path(self) -> Path:
+        return self.workspace / "JOIN_NOTIFICATION.md"
+
     # -- Framework paths (bundled with package or repo root) --
 
     @property

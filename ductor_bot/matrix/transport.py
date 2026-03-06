@@ -193,8 +193,14 @@ class MatrixTransport:
         await self._broadcast(text)
 
     async def _broadcast(self, text: str) -> None:
-        """Send to all allowed rooms."""
-        for room_id in self._bot.config.matrix.allowed_rooms:
+        """Send to all allowed rooms (falls back to last active room)."""
+        rooms = list(self._bot.config.matrix.allowed_rooms)
+        if not rooms and self._bot._last_active_room:
+            rooms = [self._bot._last_active_room]
+        if not rooms:
+            logger.warning("_broadcast: no rooms available, message lost: %s", text[:80])
+            return
+        for room_id in rooms:
             await matrix_send_rich(self._bot.client, room_id, text)
 
 

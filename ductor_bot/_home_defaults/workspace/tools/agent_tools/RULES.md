@@ -60,8 +60,36 @@ python3 tools/agent_tools/create_agent.py \
   --token "BOT_TOKEN" \
   --users "USER_ID1,USER_ID2" \
   --provider openai \
-  --model gpt-5.3-codex
+  --model gpt-5.3-codex \
+  --description "Short agent description for the join notification"
 ```
+
+### Join Notification (`--description`)
+
+**Always provide `--description`** when creating a sub-agent. This text is
+saved as `workspace/JOIN_NOTIFICATION.md` and **automatically sent + pinned**
+when the user first opens the bot chat or the bot joins a room.
+
+Write a compact message (max ~500 chars) that tells the user:
+1. What this agent does (one sentence)
+2. Key commands: `/new` (fresh context), `/stop` (cancel), `/model` (switch), `/help`
+3. How to start
+
+Example:
+```
+--description "I'm your code review assistant. Send me code or a repo link and I'll review it.
+
+**Commands**
+- /new — Fresh conversation
+- /stop — Cancel running task
+- /model — Switch AI model
+- /help — All commands
+
+Send any message to begin."
+```
+
+To update an existing agent's notification, edit
+`~/.ductor/agents/<name>/workspace/JOIN_NOTIFICATION.md` directly.
 
 ## Inter-Agent Communication
 
