@@ -46,7 +46,7 @@ The onboarding wizard handles CLI checks, transport setup (Telegram or Matrix), 
 - a Telegram Bot Token from [@BotFather](https://t.me/BotFather), or
 - a Matrix account on a homeserver (homeserver URL, user ID, password/access token)
 
-For Matrix support: `pip install ductor[matrix]` — see [Matrix setup guide](docs/matrix-setup.md).
+For Matrix support: `ductor install matrix` — see [Matrix setup guide](docs/matrix-setup.md).
 
 Detailed setup: [`docs/installation.md`](docs/installation.md)
 
@@ -210,7 +210,7 @@ Telegram is the primary transport — full feature set, battle-tested, zero extr
 | Messenger | Status | Streaming | Buttons | Install |
 |---|---|---|---|---|
 | **Telegram** | primary | Live message edits | Inline keyboards | `pip install ductor` |
-| **Matrix** | supported | Segment-based (new messages) | Emoji reactions | `pip install ductor[matrix]` |
+| **Matrix** | supported | Segment-based (new messages) | Emoji reactions | `ductor install matrix` |
 
 Both transports can run **in parallel** on the same agent:
 
