@@ -212,6 +212,49 @@ class TestCronObserverScheduling:
 
         create.assert_called_once()
 
+    async def test_executing_job_survives_reschedule(self, tmp_path: Path) -> None:
+        """A job whose _execute_job is running must not be cancelled by _reschedule_all."""
+        paths = _make_paths(tmp_path)
+        mgr = _make_manager(paths)
+        mgr.add_job(_make_job("running"))
+        mgr.add_job(_make_job("idle"))
+
+        observer = _make_observer(paths, mgr)
+        await observer.start()
+        assert "running" in observer._scheduled
+        assert "idle" in observer._scheduled
+
+        running_task = observer._scheduled["running"]
+        idle_task = observer._scheduled["idle"]
+
+        observer._executing.add("running")
+        try:
+            await observer._reschedule_all()
+        finally:
+            observer._executing.discard("running")
+
+        assert not running_task.cancelled()
+        assert idle_task.cancelled()
+        await observer.stop()
+
+    async def test_stop_cancels_executing_jobs(self, tmp_path: Path) -> None:
+        """stop() must cancel ALL tasks including currently executing ones."""
+        paths = _make_paths(tmp_path)
+        mgr = _make_manager(paths)
+        mgr.add_job(_make_job("running"))
+
+        observer = _make_observer(paths, mgr)
+        await observer.start()
+        assert "running" in observer._scheduled
+
+        task = observer._scheduled["running"]
+        observer._executing.add("running")
+
+        await observer.stop()
+
+        assert len(observer._scheduled) == 0
+        assert task.done()
+
 
 class TestCronObserverExecution:
     """Job execution tests."""
