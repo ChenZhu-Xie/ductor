@@ -124,12 +124,12 @@ class TelegramTransport:
         )
 
     async def _deliver_heartbeat(self, env: Envelope) -> None:
-        logger.debug("Heartbeat delivery chars=%d", len(env.result_text))
+        logger.debug("Heartbeat delivery chars=%d topic=%s", len(env.result_text), env.topic_id)
         await send_rich(
             self._bot.bot_instance,
             env.chat_id,
             env.result_text,
-            SendRichOpts(allowed_roots=self._roots()),
+            SendRichOpts(allowed_roots=self._roots(), thread_id=env.topic_id),
         )
         logger.info("Heartbeat delivered")
 
