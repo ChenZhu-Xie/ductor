@@ -572,9 +572,9 @@ class Orchestrator:
             return []
         return self._observers.background.active_tasks(chat_id)
 
-    def is_chat_busy(self, chat_id: int) -> bool:
+    def is_chat_busy(self, chat_id: int, topic_id: int | None = None) -> bool:
         """Check if a chat has active CLI processes."""
-        return self._process_registry.has_active(chat_id)
+        return self._process_registry.has_active(chat_id, topic_id)
 
     async def _ensure_docker(self) -> None:
         """Health-check Docker before CLI calls; auto-recover or fall back."""

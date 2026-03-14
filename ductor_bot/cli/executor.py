@@ -153,7 +153,11 @@ async def run_streaming_subprocess(
     logger.info("%s subprocess starting pid=%s", provider_label, process.pid)
 
     reg = config.process_registry
-    tracked = reg.register(config.chat_id, process, config.process_label) if reg else None
+    tracked = (
+        reg.register(config.chat_id, process, config.process_label, topic_id=config.topic_id)
+        if reg
+        else None
+    )
     stderr_drain = asyncio.create_task(process.stderr.read())
 
     try:
@@ -288,7 +292,11 @@ async def run_oneshot_subprocess(
     logger.info("%s subprocess starting pid=%s", provider_label, process.pid)
 
     reg = config.process_registry
-    tracked = reg.register(config.chat_id, process, config.process_label) if reg else None
+    tracked = (
+        reg.register(config.chat_id, process, config.process_label, topic_id=config.topic_id)
+        if reg
+        else None
+    )
     try:
         stdin_data = spec.prompt.encode() if _IS_WINDOWS else None
         if spec.timeout_controller:
