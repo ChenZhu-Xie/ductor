@@ -26,6 +26,7 @@ class CLIResponse(BaseModel):
     total_cost_usd: float | None = None
     usage: dict[str, Any] = Field(default_factory=dict)
     model_usage: dict[str, Any] = Field(default_factory=dict)
+    usage_perc: float | None = None
 
     @property
     def input_tokens(self) -> int:
@@ -41,6 +42,11 @@ class CLIResponse(BaseModel):
     def total_tokens(self) -> int:
         """Combined input + output tokens for context tracking."""
         return self.input_tokens + self.output_tokens
+
+    @property
+    def active_model(self) -> str:
+        """The specific model ID that produced this response (if provided by stats)."""
+        return str(self.usage.get("active_model", ""))
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +78,8 @@ class AgentResponse:
     cost_usd: float = 0.0
     total_tokens: int = 0
     input_tokens: int = 0
+    active_model: str = ""
+    usage_perc: float | None = None
     num_turns: int = 0
     timed_out: bool = False
     duration_ms: float | None = None

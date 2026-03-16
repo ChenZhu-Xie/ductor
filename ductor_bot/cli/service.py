@@ -47,6 +47,7 @@ class _StreamCallbacks:
         self._on_tool = on_tool
         self._on_status = on_status
         self.init_session_id: str | None = None
+        self.captured_usage_perc: float | None = None
 
     async def dispatch(self, event: StreamEvent) -> tuple[str, ResultEvent | None]:
         """Handle one event. Returns (accumulated_text_chunk, result_or_none)."""
@@ -54,6 +55,8 @@ class _StreamCallbacks:
             self.init_session_id = event.session_id
             return "", None
         if isinstance(event, AssistantTextDelta) and event.text:
+            if event.usage_perc is not None:
+                self.captured_usage_perc = event.usage_perc
             if self._on_text is not None:
                 await self._on_text(event.text)
             return event.text, None
@@ -72,6 +75,8 @@ class _StreamCallbacks:
             if self._on_status is not None:
                 await self._on_status(None)
         elif isinstance(event, ResultEvent):
+            if event.usage_perc is not None:
+                self.captured_usage_perc = event.usage_perc
             return "", event
         return "", None
 
@@ -247,6 +252,7 @@ class CLIService:
             usage=result_event.usage,
             model_usage=result_event.model_usage,
             num_turns=result_event.num_turns,
+            usage_perc=callbacks.captured_usage_perc or result_event.usage_perc,
         )
         return _cli_response_to_agent_response(cli_resp)
 
@@ -291,6 +297,7 @@ class CLIService:
             cost_usd=resp.cost_usd,
             total_tokens=resp.total_tokens,
             input_tokens=resp.input_tokens,
+            active_model=resp.active_model,
             timed_out=resp.timed_out,
             duration_ms=resp.duration_ms,
             stream_fallback=True,
@@ -356,6 +363,8 @@ def _cli_response_to_agent_response(
         cost_usd=resp.total_cost_usd or 0.0,
         total_tokens=resp.total_tokens,
         input_tokens=resp.input_tokens,
+        active_model=resp.active_model,
+        usage_perc=resp.usage_perc,
         num_turns=resp.num_turns or 0,
         timed_out=resp.timed_out,
         duration_ms=resp.duration_ms,

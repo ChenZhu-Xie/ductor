@@ -82,6 +82,9 @@ class ProviderSessionData:
     message_count: int = 0
     total_cost_usd: float = 0.0
     total_tokens: int = 0
+    active_model: str = ""
+    input_tokens: int = 0
+    usage_perc: float | None = None
 
 
 @dataclass(init=False)
@@ -226,6 +229,9 @@ class SessionData:
                 message_count=SessionData._safe_int(value.get("message_count", 0)),
                 total_cost_usd=SessionData._safe_float(value.get("total_cost_usd", 0.0)),
                 total_tokens=SessionData._safe_int(value.get("total_tokens", 0)),
+                active_model=str(value.get("active_model", "") or ""),
+                input_tokens=SessionData._safe_int(value.get("input_tokens", 0)),
+                usage_perc=SessionData._safe_float(value.get("usage_perc")) if value.get("usage_perc") is not None else None,
             )
         return out
 
@@ -414,6 +420,10 @@ class SessionManager:
         session: SessionData,
         cost_usd: float = 0.0,
         tokens: int = 0,
+        *,
+        active_model: str = "",
+        input_tokens: int = 0,
+        usage_perc: float | None = None,
     ) -> None:
         """Update session metrics and persist.
 
@@ -439,6 +449,16 @@ class SessionManager:
             current.message_count += 1
             current.total_cost_usd += cost_usd
             current.total_tokens += tokens
+
+            # Update provider-specific detail fields
+            prov_data = current._current_provider_data()
+            if active_model:
+                prov_data.active_model = active_model
+            if input_tokens > 0:
+                prov_data.input_tokens = input_tokens
+            if usage_perc is not None:
+                prov_data.usage_perc = usage_perc
+
             sessions[key] = current
             await self._save(sessions)
 
@@ -462,6 +482,9 @@ class SessionManager:
                 message_count=data.message_count,
                 total_cost_usd=data.total_cost_usd,
                 total_tokens=data.total_tokens,
+                active_model=data.active_model,
+                input_tokens=data.input_tokens,
+                usage_perc=data.usage_perc,
             )
             for provider, data in provider_sessions.items()
         }
@@ -477,13 +500,21 @@ class SessionManager:
                     message_count=data.message_count,
                     total_cost_usd=data.total_cost_usd,
                     total_tokens=data.total_tokens,
+                    active_model=data.active_model,
+                    input_tokens=data.input_tokens,
+                    usage_perc=data.usage_perc,
                 )
                 continue
             if data.session_id:
                 existing.session_id = data.session_id
+            if data.active_model:
+                existing.active_model = data.active_model
             existing.message_count = max(existing.message_count, data.message_count)
             existing.total_cost_usd = max(existing.total_cost_usd, data.total_cost_usd)
             existing.total_tokens = max(existing.total_tokens, data.total_tokens)
+            existing.input_tokens = data.input_tokens
+            if data.usage_perc is not None:
+                existing.usage_perc = data.usage_perc
 
     async def sync_session_target(
         self,

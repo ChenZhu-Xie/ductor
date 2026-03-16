@@ -1,134 +1,82 @@
-This file gives coding agents a current map of the repository.
+# GEMINI.md
+
+This file provides an architectural map and developmental context for the **ductor** project.
 
 ## Project Overview
 
-ductor is a Telegram bot that routes chat input to official provider CLIs (`claude`, `codex`, `gemini`), streams responses back to Telegram, persists per-chat state, and runs cron/webhook/heartbeat automation in-process.
+**ductor** is a versatile bot interface that allows users to control official provider CLIs (Anthropic's `claude`, OpenAI's `codex`, and Google's `gemini`) via messengers like Telegram and Matrix. It operates by running these CLIs as subprocesses on the host machine, ensuring that all interactions use the user's official subscriptions and local environment.
 
-Stack:
+### Core Architecture
+- **Multi-Agent Supervisor:** Manages the main agent and any dynamically created sub-agents.
+- **Orchestrator:** The central routing hub that dispatches messages to commands, conversation flows, or background tasks.
+- **CLI Service:** A unified interface for interacting with various AI providers, handling subprocess execution, stream parsing, and process lifecycle.
+- **Messenger Protocol:** An abstraction layer allowing multiple transports (Telegram, Matrix) to coexist and share core logic.
+- **Persistent State:** All configuration, session history, memory, and scheduled tasks are stored as plain JSON or Markdown files in `~/.ductor/`.
 
-- Python 3.11+
-- aiogram 3.x
-- Pydantic 2.x
-- asyncio
+### Tech Stack
+- **Language:** Python 3.11+
+- **Asynchronous Framework:** `asyncio`
+- **Messenger Libraries:** `aiogram` (Telegram), `matrix-nio` (Matrix)
+- **Data Validation:** `pydantic`
+- **Build System:** `hatchling`
+- **UI/CLI:** `rich`, `questionary`
 
-## Development Commands
+## Building and Running
 
+### Setup Environment
 ```bash
-# Setup
-python -m venv .venv && source .venv/bin/activate
+# Create and activate a virtual environment
+python -m venv .venv
+source .venv/bin/activate  # Linux/macOS
+# or: .venv\Scripts\activate  # Windows
+
+# Install the project in editable mode with development dependencies
 pip install -e ".[dev]"
+```
 
-# Run
+### Running the Bot
+```bash
+# Start the bot (runs onboarding wizard if not configured)
 ductor
+
+# Start with verbose logging
 ductor -v
+```
 
-# Tests
+### Testing
+```bash
+# Run the full test suite
 pytest
+
+# Run specific tests
 pytest tests/bot/test_app.py
-pytest -k "pattern"
-
-# Quality
-ruff format .
-ruff check .
-mypy ductor_bot
 ```
 
-## Runtime Flow
+## Development Conventions
 
-```text
-Telegram Update
-  -> AuthMiddleware
-  -> SequentialMiddleware (queue + per-chat lock)
-  -> TelegramBot handlers
-  -> Orchestrator
-  -> CLIService
-  -> provider subprocess (claude/codex/gemini)
-  -> Telegram output (stream edit or one-shot)
-```
+### Coding Standards
+- **Linting & Formatting:** The project uses `ruff` for both linting and formatting.
+- **Type Checking:** `mypy` is used in `strict` mode to ensure type safety.
+- **Line Length:** Maximum line length is set to 100 characters.
 
-## Module Map
-
-| Module | Purpose |
+### Project Structure
+| Directory | Description |
 |---|---|
-| `bot/` | Telegram handlers, callback routing, streaming delivery, queue UX |
-| `orchestrator/` | command registry, directives/hooks, flow routing, observer wiring |
-| `cli/` | provider wrappers, stream parsing, auth checks, process registry, model caches |
-| `session/` | chat sessions with provider-isolated buckets |
-| `background/` | named background sessions (`/session`) with follow-ups |
-| `cron/` | in-process scheduler and one-shot task execution |
-| `webhook/` | HTTP hooks (`wake` and `cron_task`) |
-| `heartbeat/` | periodic proactive checks in active sessions |
-| `cleanup/` | daily retention cleanup |
-| `workspace/` | home seeding, rules deployment/sync, skill sync |
-| `infra/` | PID lock, service backends, Docker manager, update/restart helpers |
+| `ductor_bot/bot/` | Messenger-specific handlers and UI logic. |
+| `ductor_bot/orchestrator/` | Message routing, command registry, and execution flows. |
+| `ductor_bot/cli/` | Provider-specific wrappers and subprocess management. |
+| `ductor_bot/messenger/` | Transport implementations (Telegram, Matrix). |
+| `ductor_bot/session/` | Session management and state persistence. |
+| `ductor_bot/workspace/` | Filesystem initialization and path management. |
+| `ductor_bot/infra/` | Low-level infrastructure (PID locks, Docker, Service managers). |
 
-## Key Runtime Patterns
+### Key Patterns
+- **Subprocess Isolation:** Providers are executed as subprocesses, often within an optional Docker sandbox.
+- **Streaming Output:** Real-time response streaming is achieved through asynchronous generators and messenger-specific delivery mechanisms.
+- **Heartbeat System:** Proactive checks ensure that long-running processes are still alive and that the user is updated on progress.
+- **Shared Memory:** `MAINMEMORY.md` and `SHAREDMEMORY.md` provide persistent context across conversations.
 
-- `DuctorPaths` (`workspace/paths.py`) is the single source of truth for paths.
-- Workspace init is zone-based:
-  - Zone 2 overwrite: `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, and framework cron/webhook tool scripts.
-  - Zone 3 seed-once for user-owned files.
-- Rules are selected from `RULES*.md` variants and deployed per authenticated provider.
-- Rule sync updates existing `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` siblings recursively by mtime.
-- Skill sync spans `~/.ductor/workspace/skills`, `~/.claude/skills`, `~/.codex/skills`, `~/.gemini/skills`.
-  - normal mode: links
-  - Docker mode: managed copies (`.ductor_managed` marker)
-- Streaming fallback is automatic; `/stop` abort checks are enforced during event loop processing.
-- Session state is provider-isolated; `/new` resets only the active provider bucket.
-
-## Background Systems
-
-All run as in-process asyncio tasks:
-
-- `BackgroundObserver`
-- `CronObserver`
-- `HeartbeatObserver`
-- `WebhookObserver`
-- `CleanupObserver`
-- `CodexCacheObserver`
-- `GeminiCacheObserver`
-- rule sync watcher
-- skill sync watcher
-- update observer (upgradeable installs)
-
-## Service Backends
-
-- Linux: systemd user service
-- macOS: launchd Launch Agent
-- Windows: Task Scheduler
-
-`ductor service logs` behavior:
-
-- Linux: `journalctl --user -u ductor -f`
-- macOS/Windows: recent lines from `~/.ductor/logs/agent.log` (fallback newest `*.log`)
-
-## CLI Commands
-
-| Command | Effect |
-|---|---|
-| `ductor` | Start bot (runs onboarding if needed) |
-| `ductor stop` | Stop bot and Docker container |
-| `ductor restart` | Restart bot |
-| `ductor upgrade` | Stop, upgrade, restart |
-| `ductor docker rebuild` | Stop bot, remove container & image, rebuilt on next start |
-| `ductor docker enable` | Set `docker.enabled = true` |
-| `ductor docker disable` | Stop container, set `docker.enabled = false` |
-| `ductor service install` | Install as background service |
-| `ductor service [sub]` | Service management (status/stop/logs/...) |
-
-## Data Files (`~/.ductor`)
-
-- `config/config.json`
-- `sessions.json`
-- `cron_jobs.json`
-- `webhooks.json`
-- `logs/agent.log`
-
-## Conventions
-
-- `asyncio_mode = "auto"` in tests
-- line length 100
-- mypy strict mode
-- ruff with strict lint profile
-- config deep-merge adds new defaults without dropping user keys
-- supervisor restart code is `42`
+## Maintenance and Operations
+- **Service Management:** `ductor service install` sets up the bot as a system service (systemd, launchd, or Task Scheduler).
+- **Docker Sandbox:** `ductor docker enable` configures an isolated environment for executing untrusted code or tools.
+- **Hot-Reload:** Configuration changes in `config.json` are monitored and applied without requiring a full restart.

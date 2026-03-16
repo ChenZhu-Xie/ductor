@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -22,6 +23,19 @@ from ductor_bot.cli.stream_events import (
 logger = logging.getLogger(__name__)
 
 _StreamParser = Callable[[dict[str, Any]], list[StreamEvent]]
+
+# Matches patterns like "12.3% context used" or "(80% context used)"
+CONTEXT_USAGE_RE = re.compile(r"(\d+(?:\.\d+)?)%\s+context\s+used", re.IGNORECASE)
+
+# Known Gemini model context window limits (tokens)
+# These act as the final fallback for percentage calculation.
+GEMINI_MODEL_LIMITS: dict[str, int] = {
+    "gemini-2.0-flash": 1_048_576,
+    "gemini-2.0-pro-exp": 2_097_152,
+    "gemini-1.5-pro": 2_097_152,
+    "gemini-1.5-flash": 1_048_576,
+    "gemini-1.0-pro": 32_768,
+}
 
 
 def parse_gemini_stream_line(line: str) -> list[StreamEvent]:
@@ -73,7 +87,10 @@ def _parse_gemini_message(data: dict[str, Any]) -> list[StreamEvent]:
         return []
 
     if isinstance(content, str):
-        return [AssistantTextDelta(type="assistant", text=content)]
+        # 优先从文本匹配百分比
+        match = CONTEXT_USAGE_RE.search(content)
+        usage_perc = float(match.group(1)) if match else None
+        return [AssistantTextDelta(type="assistant", text=content, usage_perc=usage_perc)]
 
     if isinstance(content, list):
         events: list[StreamEvent] = []
@@ -90,14 +107,62 @@ def _parse_gemini_result(data: dict[str, Any]) -> ResultEvent:
     if not isinstance(stats, dict):
         stats = {}
 
-    usage = {
+    usage: dict[str, Any] = {
         "input_tokens": stats.get("input_tokens", 0),
         "output_tokens": stats.get("output_tokens", 0),
         "cached_tokens": stats.get("cached_tokens", stats.get("cached", 0)),
     }
 
-    is_error = bool(data.get("is_error")) or data.get("status") == "error"
+    # Handle nested model stats from newer Gemini CLI versions
+    model_stats = stats.get("models", {})
+    if isinstance(model_stats, dict) and model_stats:
+        max_input = -1
+        for m_name, m_data in model_stats.items():
+            if not isinstance(m_data, dict):
+                continue
+            m_tokens = m_data.get("tokens", {})
+            if not isinstance(m_tokens, dict):
+                continue
+            m_input = m_tokens.get("input", 0)
+            if m_input > max_input:
+                max_input = m_input
+                usage["input_tokens"] = m_input
+                usage["output_tokens"] = m_tokens.get("candidates", 0)
+                usage["cached_tokens"] = m_tokens.get("cached", 0)
+                usage["active_model"] = m_name
+
+    # 结果文本提取
     res = extract_result_text(data)
+
+    # 优先匹配逻辑：文本正则 > stats 显式字段 > token 计算 fallback
+    usage_perc: float | None = None
+    
+    # 1. 尝试从结果文本匹配
+    if res:
+        match = CONTEXT_USAGE_RE.search(res)
+        if match:
+            usage_perc = float(match.group(1))
+
+    # 2. 回退到 stats 显式比例
+    if usage_perc is None:
+        if "context_usage_ratio" in stats:
+            usage_perc = float(stats["context_usage_ratio"]) * 100
+        elif "usage_perc" in stats:
+            usage_perc = float(stats["usage_perc"])
+
+    # 3. 终极回退：通过 token 计算
+    if usage_perc is None and usage["input_tokens"] > 0:
+        model_name = usage.get("active_model", "")
+        # Try to find a limit for the active model
+        limit = GEMINI_MODEL_LIMITS.get(model_name)
+        if not limit:
+            # Fallback to a sensible default if model is unknown (e.g. 1M for flash)
+            limit = 1_048_576
+        
+        total_tokens = usage["input_tokens"] + usage["output_tokens"]
+        usage_perc = (total_tokens / limit) * 100
+
+    is_error = bool(data.get("is_error")) or data.get("status") == "error"
 
     if not res and is_error:
         err = data.get("error")
@@ -113,6 +178,7 @@ def _parse_gemini_result(data: dict[str, Any]) -> ResultEvent:
         is_error=is_error,
         duration_ms=stats.get("duration_ms"),
         usage=usage,
+        usage_perc=usage_perc,
     )
 
 

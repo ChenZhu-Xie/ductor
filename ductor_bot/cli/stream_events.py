@@ -22,6 +22,7 @@ class AssistantTextDelta(StreamEvent):
     """Text from an assistant turn."""
 
     text: str = ""
+    usage_perc: float | None = None
 
 
 class SystemInitEvent(StreamEvent):
@@ -43,6 +44,7 @@ class ResultEvent(StreamEvent):
     usage: dict[str, Any] = Field(default_factory=dict)
     model_usage: dict[str, Any] = Field(default_factory=dict)
     num_turns: int | None = None
+    usage_perc: float | None = None
 
 
 class ToolUseEvent(StreamEvent):

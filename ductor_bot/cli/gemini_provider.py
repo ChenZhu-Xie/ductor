@@ -19,7 +19,13 @@ from ductor_bot.cli.base import (
     _feed_stdin_and_close,
     docker_wrap,
 )
-from ductor_bot.cli.gemini_events import extract_result_text, extract_text, parse_gemini_stream_line
+from ductor_bot.cli.gemini_events import (
+    CONTEXT_USAGE_RE,
+    GEMINI_MODEL_LIMITS,
+    extract_result_text,
+    extract_text,
+    parse_gemini_stream_line,
+)
 from ductor_bot.cli.gemini_utils import (
     create_system_prompt_file,
     find_gemini_cli,
@@ -50,6 +56,7 @@ class _GeminiStreamState:
 
     last_session_id: str | None
     saw_result: bool = False
+    latest_usage_perc: float | None = None
 
     def track(self, event: StreamEvent) -> None:
         """Track session + final-result information from one stream event."""
@@ -60,6 +67,8 @@ class _GeminiStreamState:
             self.saw_result = True
             if not event.session_id:
                 event.session_id = self.last_session_id
+            if event.usage_perc is None:
+                event.usage_perc = self.latest_usage_perc
 
 
 class GeminiCLI(BaseCLI):
@@ -236,9 +245,14 @@ class GeminiCLI(BaseCLI):
                 msg = "Gemini subprocess created without stderr pipe"
                 raise RuntimeError(msg)
 
-            stderr_task = asyncio.create_task(process.stderr.read())
+            # Start real-time stderr monitoring for context usage percentages
             reg, tracked = self._track_process(process)
             state = _GeminiStreamState(last_session_id=resume_session)
+            stderr_captured = bytearray()
+            stderr_monitoring_task = asyncio.create_task(
+                self._monitor_stderr(process.stderr, state, stderr_captured)
+            )
+            await asyncio.sleep(0)  # Give the task a chance to start
             timed_out = False
 
             try:
@@ -260,7 +274,11 @@ class GeminiCLI(BaseCLI):
                         session_id=state.last_session_id,
                     )
             finally:
-                stderr_bytes = await _finish_stream_process(process, stderr_task)
+                # Stop monitoring and collect final stderr bytes for error reporting
+                stderr_monitoring_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await stderr_monitoring_task
+                stderr_bytes = bytes(stderr_captured)
                 self._untrack_process(reg, tracked)
 
             final_event = _build_stream_exit_event(
@@ -307,6 +325,37 @@ class GeminiCLI(BaseCLI):
             chat_id=self._config.chat_id,
         ):
             yield event
+
+    async def _monitor_stderr(
+        self,
+        stderr_reader: asyncio.StreamReader,
+        state: _GeminiStreamState,
+        captured: bytearray,
+    ) -> bytes:
+        """Monitor stderr for context usage percentage updates and return final bytes."""
+        try:
+            while True:
+                # Use a small chunk size to allow frequent usage percentage updates
+                chunk = await stderr_reader.read(4096)
+                if not chunk:
+                    break
+                captured.extend(chunk)
+                
+                # Check for usage percentage in the current chunk or the last bit of collected data
+                # We decode the last 1000 bytes to be safe and efficient
+                lookback = bytes(captured[-1000:])
+                text = lookback.decode(errors="replace")
+                matches = CONTEXT_USAGE_RE.findall(text)
+                if matches:
+                    # Use the last match in this chunk
+                    state.latest_usage_perc = float(matches[-1])
+                    logger.debug("Gemini stderr intercepted usage: %.1f%%", state.latest_usage_perc)
+        except asyncio.CancelledError:
+            # Drain remaining stderr content before exiting
+            remaining = await stderr_reader.read()
+            captured.extend(remaining)
+            return bytes(captured)
+        return bytes(captured)
 
     def _create_system_prompt_path(self) -> str | None:
         """Create a temporary system prompt file when prompt content is present.
@@ -594,9 +643,19 @@ def _gemini_settings_path(env: dict[str, str]) -> Path:
 def _parse_response(stdout: bytes, stderr: bytes, returncode: int | None) -> CLIResponse:
     """Parse Gemini CLI JSON output into CLIResponse."""
     stderr_text = stderr.decode(errors="replace")[:2000] if stderr else ""
+    
+    # 优先拦截法：从 stderr 提取百分比
+    usage_perc: float | None = None
+    if stderr:
+        match = CONTEXT_USAGE_RE.search(stderr.decode(errors="replace"))
+        if match:
+            usage_perc = float(match.group(1))
+
     raw = stdout.decode(errors="replace").strip()
     if not raw:
-        return CLIResponse(result="", is_error=True, returncode=returncode, stderr=stderr_text)
+        return CLIResponse(
+            result="", is_error=True, returncode=returncode, stderr=stderr_text, usage_perc=usage_perc
+        )
 
     try:
         parsed = json.loads(raw)
@@ -606,6 +665,7 @@ def _parse_response(stdout: bytes, stderr: bytes, returncode: int | None) -> CLI
             is_error=returncode != 0,
             returncode=returncode,
             stderr=stderr_text,
+            usage_perc=usage_perc,
         )
 
     if not isinstance(parsed, dict):
@@ -614,6 +674,7 @@ def _parse_response(stdout: bytes, stderr: bytes, returncode: int | None) -> CLI
             is_error=returncode != 0,
             returncode=returncode,
             stderr=stderr_text,
+            usage_perc=usage_perc,
         )
 
     stats = parsed.get("stats", {})
@@ -625,6 +686,36 @@ def _parse_response(stdout: bytes, stderr: bytes, returncode: int | None) -> CLI
         "output_tokens": stats.get("output_tokens", 0),
         "cached_tokens": stats.get("cached_tokens", stats.get("cached", 0)),
     }
+
+    # Handle nested model stats from newer Gemini CLI versions
+    active_model = ""
+    model_stats = stats.get("models", {})
+    if isinstance(model_stats, dict) and model_stats:
+        max_input = -1
+        for m_name, m_data in model_stats.items():
+            if not isinstance(m_data, dict):
+                continue
+            m_tokens = m_data.get("tokens", {})
+            if not isinstance(m_tokens, dict):
+                continue
+            m_input = m_tokens.get("input", 0)
+            if m_input > max_input:
+                max_input = m_input
+                active_model = m_name
+                usage["input_tokens"] = m_input
+                usage["output_tokens"] = m_tokens.get("candidates", 0)
+                usage["cached_tokens"] = m_tokens.get("cached", 0)
+                usage["active_model"] = m_name
+
+    # Fallback 计算法：如果拦截法没拿到，尝试从 stats 拿或计算
+    if usage_perc is None:
+        if "context_usage_ratio" in stats:
+            usage_perc = float(stats["context_usage_ratio"]) * 100
+        elif "usage_perc" in stats:
+            usage_perc = float(stats["usage_perc"])
+        elif usage["input_tokens"] > 0:
+            limit = GEMINI_MODEL_LIMITS.get(active_model, 1_048_576)
+            usage_perc = ((usage["input_tokens"] + usage["output_tokens"]) / limit) * 100
 
     is_cli_error = bool(parsed.get("is_error")) or parsed.get("status") == "error"
     result = extract_result_text(parsed)
@@ -641,6 +732,7 @@ def _parse_response(stdout: bytes, stderr: bytes, returncode: int | None) -> CLI
         stderr=stderr_text,
         duration_ms=stats.get("duration_ms"),
         usage=usage,
+        usage_perc=usage_perc,
     )
 
 

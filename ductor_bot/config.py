@@ -474,3 +474,30 @@ def set_gemini_models(models: frozenset[str]) -> None:
 def reset_gemini_models() -> None:
     """Clear runtime Gemini models. For test teardown only."""
     _runtime_gemini[0] = frozenset()
+
+
+GEMINI_CONTEXT_LIMITS: dict[str, int] = {
+    "gemini-1.5-pro": 2_000_000,
+    "gemini-1.5-flash": 1_000_000,
+    "gemini-2.0-flash": 1_048_576,
+    "gemini-2.0-flash-lite": 1_048_576,
+    "gemini-2.5-flash-lite": 1_048_576,
+    "gemini-3-flash-preview": 1_048_576,
+    "auto-gemini-2.0-flash": 1_048_576,
+    "auto-gemini-1.5-pro": 2_000_000,
+    "auto-gemini-1.5-flash": 1_000_000,
+}
+
+
+def get_gemini_context_limit(model_id: str) -> int | None:
+    """Return context token limit for a Gemini model ID, or None if unknown."""
+    if not model_id:
+        return None
+    # Try exact match first
+    if model_id in GEMINI_CONTEXT_LIMITS:
+        return GEMINI_CONTEXT_LIMITS[model_id]
+    # Try prefix match (e.g. gemini-1.5-pro-002 -> gemini-1.5-pro)
+    for base, limit in GEMINI_CONTEXT_LIMITS.items():
+        if model_id.startswith(base):
+            return limit
+    return None

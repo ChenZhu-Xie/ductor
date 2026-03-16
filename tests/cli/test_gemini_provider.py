@@ -75,7 +75,17 @@ def _make_streaming_process(
     proc.stdout = stdout_mock
 
     stderr_mock = AsyncMock()
-    stderr_mock.read = AsyncMock(return_value=stderr)
+
+    # Proper async side effect for read
+    async def _read_side_effect(*args: Any, **kwargs: Any) -> bytes:
+        if not hasattr(_read_side_effect, "_called"):
+            setattr(_read_side_effect, "_called", True)
+            return stderr
+        return b""
+
+    stderr_mock.read = AsyncMock(side_effect=_read_side_effect)
+    # Mock readline: returns one chunk then empty
+    stderr_mock.readline = AsyncMock(side_effect=[stderr, b""])
     proc.stderr = stderr_mock
 
     stdin_mock = MagicMock()
@@ -142,20 +152,29 @@ class TestPrepareEnv:
     def test_prepends_cli_parent_when_cli_path_is_absolute(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        is_windows = os.name == "nt"
+        cli_path = "C:/opt/node/v22.0.0/bin/gemini" if is_windows else "/opt/node/v22.0.0/bin/gemini"
+        cli_js_path = (
+            "C:/opt/node/v22.0.0/lib/node_modules/@google/gemini-cli/dist/index.js"
+            if is_windows
+            else "/opt/node/v22.0.0/lib/node_modules/@google/gemini-cli/dist/index.js"
+        )
         monkeypatch.setattr(
             "ductor_bot.cli.gemini_provider.find_gemini_cli",
-            lambda: "/opt/node/v22.0.0/bin/gemini",
+            lambda: cli_path,
         )
         monkeypatch.setattr(
             "ductor_bot.cli.gemini_provider.find_gemini_cli_js",
-            lambda: "/opt/node/v22.0.0/lib/node_modules/@google/gemini-cli/dist/index.js",
+            lambda: cli_js_path,
         )
         cli = GeminiCLI(CLIConfig(provider="gemini", model="gemini-2.5-pro"))
 
-        with patch.dict("os.environ", {"PATH": "/usr/bin"}, clear=False):
+        path_val = "C:/usr/bin" if is_windows else "/usr/bin"
+        with patch.dict("os.environ", {"PATH": path_val}, clear=False):
             env = cli._prepare_env()
 
-        assert env["PATH"].split(os.pathsep)[0] == "/opt/node/v22.0.0/bin"
+        expected_parent = "C:\\opt\\node\\v22.0.0\\bin" if is_windows else "/opt/node/v22.0.0/bin"
+        assert env["PATH"].split(os.pathsep)[0] == expected_parent
 
     def test_host_to_container_path_normalizes_windows_separators(
         self, monkeypatch: pytest.MonkeyPatch
@@ -457,3 +476,27 @@ class TestLogCmd:
 
     def test_streaming_label(self) -> None:
         _log_cmd(["gemini", "--output-format", "stream-json"], streaming=True)
+
+def test_parse_response_with_nested_model_stats() -> None:
+    data = {
+        "type": "result",
+        "result": "Hello",
+        "stats": {
+            "models": {
+                "gemini-2.0-flash": {
+                    "tokens": {
+                        "input": 123,
+                        "candidates": 45,
+                        "cached": 10
+                    }
+                }
+            }
+        }
+    }
+    resp = _parse_response(json.dumps(data).encode(), b"", 0)
+    assert resp.usage["input_tokens"] == 123
+    assert resp.usage["output_tokens"] == 45
+    assert resp.usage["cached_tokens"] == 10
+    assert resp.usage["active_model"] == "gemini-2.0-flash"
+    # percentage will be calculated from gemini-2.0-flash limit (1048576)
+    assert resp.usage_perc == ((123 + 45) / 1_048_576) * 100

@@ -136,7 +136,12 @@ async def _update_session(
         )
         session.session_id = response.session_id
     await orch._sessions.update_session(
-        session, cost_usd=response.cost_usd, tokens=response.total_tokens
+        session,
+        cost_usd=response.cost_usd,
+        tokens=response.total_tokens,
+        active_model=response.active_model,
+        input_tokens=response.input_tokens,
+        usage_perc=response.usage_perc,
     )
 
 
@@ -179,7 +184,12 @@ async def _handle_timeout(
         )
         session.session_id = response.session_id
     await orch._sessions.update_session(
-        session, cost_usd=response.cost_usd, tokens=response.total_tokens
+        session,
+        cost_usd=response.cost_usd,
+        tokens=response.total_tokens,
+        active_model=response.active_model,
+        input_tokens=response.input_tokens,
+        usage_perc=response.usage_perc,
     )
 
     timeout_s = request.timeout_seconds or 0

@@ -286,6 +286,8 @@ def _build_agent_health_block(orch: Orchestrator) -> str:
 
 async def _build_status(orch: Orchestrator, key: SessionKey) -> str:
     """Build the /status response text."""
+    from ductor_bot.config import get_gemini_context_limit
+
     runtime_model, _runtime_provider = orch.resolve_runtime_target(orch._config.model)
     configured_model = orch._config.model
 
@@ -299,11 +301,29 @@ async def _build_status(orch: Orchestrator, key: SessionKey) -> str:
         topic_line = (
             f"{t('status.topic_line', topic=session.topic_name)}\n" if session.topic_name else ""
         )
+        tokens_val = f"{session.total_tokens:,}"
+
+        # Context percentage for Gemini: prioritize captured over manual calculation
+        prov_data = session.provider_sessions.get("gemini")
+        if prov_data and prov_data.session_id:
+            perc: float | None = None
+            if prov_data.usage_perc is not None:
+                perc = prov_data.usage_perc
+            else:
+                # Fallback to manual calculation
+                model_id = prov_data.active_model or session.model
+                limit = get_gemini_context_limit(model_id)
+                if limit and prov_data.input_tokens > 0:
+                    perc = (prov_data.input_tokens / limit) * 100
+
+            if perc is not None:
+                tokens_val += f" ({perc:.1f}%)"
+
         session_block = (
             f"{topic_line}"
             f"{t('status.session_line', sid=session.session_id[:8] + '...')}\n"
             f"{t('status.messages_line', count=session.message_count)}\n"
-            f"{t('status.tokens_line', tokens=f'{session.total_tokens:,}')}\n"
+            f"{t('status.tokens_line', tokens=tokens_val)}\n"
             f"{t('status.cost_line', cost=f'{session.total_cost_usd:.4f}')}\n"
             f"{_model_line(session.model)}"
         )
