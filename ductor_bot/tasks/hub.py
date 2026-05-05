@@ -9,11 +9,18 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
-from ductor_bot.tasks.models import TaskEntry, TaskInFlight, TaskResult, TaskSubmit
+from ductor_bot.tasks.models import (
+    TaskEntry,
+    TaskInFlight,
+    TaskResult,
+    TaskSubmit,
+    normalise_priority,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from ductor_bot.cli.process_registry import ProcessRegistry
     from ductor_bot.cli.service import CLIService
     from ductor_bot.config import TasksConfig
     from ductor_bot.tasks.registry import TaskRegistry
@@ -71,6 +78,7 @@ class TaskHub:
         *,
         cli_service: CLIService | None = None,
         config: TasksConfig,
+        process_registry: ProcessRegistry | None = None,
     ) -> None:
         self._registry = registry
         self._paths = paths
@@ -83,6 +91,13 @@ class TaskHub:
         self._question_handlers: dict[str, QuestionHandler] = {}
         self._agent_chat_ids: dict[str, int] = {}
         self._maintenance_task: asyncio.Task[None] | None = None
+        # #92: registry used to kill task subprocess trees on cancel. A single
+        # shared registry works when all task subprocesses register into it
+        # (supervisor wires this — see ``AgentSupervisor._wire_task_hub``).
+        # For multi-agent setups where each agent owns its own ProcessRegistry,
+        # per-agent lookups take precedence via ``_agent_process_registries``.
+        self._process_registry = process_registry
+        self._agent_process_registries: dict[str, ProcessRegistry] = {}
 
     def start_maintenance(self) -> None:
         """Start periodic orphan cleanup (call once after bot startup)."""
@@ -106,6 +121,26 @@ class TaskHub:
     def set_cli_service(self, agent_name: str, cli: CLIService) -> None:
         """Register a per-agent CLI service for task execution."""
         self._cli_services[agent_name] = cli
+
+    def set_agent_process_registry(
+        self, agent_name: str, process_registry: ProcessRegistry
+    ) -> None:
+        """Register a per-agent ProcessRegistry for subprocess-aware cancel.
+
+        Each agent's orchestrator owns its own ``ProcessRegistry`` (see
+        ``Orchestrator.__init__``), and task subprocesses register under the
+        label ``task:<id>`` in THAT registry. When cancel() fires for a task
+        we therefore need the registry tied to the task's parent agent; this
+        map provides that lookup. Falls back to the shared ``_process_registry``
+        when no per-agent entry exists.
+        """
+        self._agent_process_registries[agent_name] = process_registry
+
+    def _resolve_process_registry(self, parent_agent: str | None) -> ProcessRegistry | None:
+        """Pick the ProcessRegistry for *parent_agent*, or the shared default."""
+        if parent_agent and parent_agent in self._agent_process_registries:
+            return self._agent_process_registries[parent_agent]
+        return self._process_registry
 
     def set_agent_paths(self, agent_name: str, paths: DuctorPaths) -> None:
         """Register per-agent paths for task folder isolation."""
@@ -133,14 +168,23 @@ class TaskHub:
             if resolved:
                 submit.chat_id = resolved
 
-        active = sum(
-            1
-            for t in self._in_flight.values()
-            if t.entry.chat_id == submit.chat_id and t.asyncio_task and not t.asyncio_task.done()
-        )
-        if active >= self._config.max_parallel:
-            msg = f"Too many background tasks ({self._config.max_parallel} max)"
-            raise ValueError(msg)
+        # #79: interactive tasks bypass the per-chat concurrency cap so
+        # direct user follow-ups stay responsive under heavy batch load.
+        # Active count excludes already-running interactive tasks for the
+        # same reason — they never "fill up" the cap for background work.
+        priority = normalise_priority(submit.priority)
+        if priority != "interactive":
+            active = sum(
+                1
+                for t in self._in_flight.values()
+                if t.entry.chat_id == submit.chat_id
+                and t.asyncio_task
+                and not t.asyncio_task.done()
+                and t.entry.priority != "interactive"
+            )
+            if active >= self._config.max_parallel:
+                msg = f"Too many background tasks ({self._config.max_parallel} max)"
+                raise ValueError(msg)
 
         provider = submit.provider_override or ""
         model = submit.model_override or ""
@@ -149,7 +193,12 @@ class TaskHub:
         # Resolve per-agent tasks_dir for folder isolation
         agent_tasks_dir = self._agent_tasks_dirs.get(submit.parent_agent)
         entry = self._registry.create(
-            submit, provider, model, thinking=thinking, tasks_dir=agent_tasks_dir
+            submit,
+            provider,
+            model,
+            thinking=thinking,
+            tasks_dir=agent_tasks_dir,
+            priority=priority,
         )
 
         # Build prompt with mandatory suffix
@@ -291,31 +340,52 @@ class TaskHub:
             logger.exception("Question delivery failed for task %s", entry.task_id)
 
     async def cancel(self, task_id: str) -> bool:
-        """Cancel a running task. Returns True if cancelled."""
+        """Cancel a running task. Returns True if cancelled.
+
+        Kill order (per issue #92 / Pitfall 2): subprocess tree first so the
+        CLI's streaming ``await`` unblocks, THEN asyncio task. Inverting this
+        order hangs — ``cli.execute`` is blocked on the subprocess pipe, and
+        a pending ``CancelledError`` cannot propagate until the pipe closes.
+        """
         inflight = self._in_flight.get(task_id)
         if inflight is None or inflight.asyncio_task is None or inflight.asyncio_task.done():
             return False
+        registry = self._resolve_process_registry(inflight.entry.parent_agent)
+        if registry is not None:
+            await registry.kill_for_task(task_id)
         inflight.asyncio_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await inflight.asyncio_task
         return True
 
     async def cancel_all(self, chat_id: int) -> int:
-        """Cancel all running tasks for a chat."""
-        count = 0
-        cancelled: list[asyncio.Task[None]] = []
-        for inflight in list(self._in_flight.values()):
+        """Cancel all running tasks for a chat.
+
+        Kill order mirrors :meth:`cancel`: every task's subprocess tree is
+        killed first (one ``kill_for_task`` per task) before any asyncio
+        ``Task.cancel`` fires. Sequential ``await`` keeps each SIGTERM→SIGKILL
+        ladder independent (see threat T-02-03).
+        """
+        targets: list[tuple[str, str | None, asyncio.Task[None]]] = [
+            (inflight.entry.task_id, inflight.entry.parent_agent, inflight.asyncio_task)
+            for inflight in list(self._in_flight.values())
             if (
                 inflight.entry.chat_id == chat_id
                 and inflight.asyncio_task
                 and not inflight.asyncio_task.done()
-            ):
-                inflight.asyncio_task.cancel()
-                cancelled.append(inflight.asyncio_task)
-                count += 1
-        if cancelled:
-            await asyncio.gather(*cancelled, return_exceptions=True)
-        return count
+            )
+        ]
+        if not targets:
+            return 0
+        for task_id, parent_agent, _ in targets:
+            registry = self._resolve_process_registry(parent_agent)
+            if registry is not None:
+                await registry.kill_for_task(task_id)
+        cancelled: list[asyncio.Task[None]] = [atask for _, _, atask in targets]
+        for atask in cancelled:
+            atask.cancel()
+        await asyncio.gather(*cancelled, return_exceptions=True)
+        return len(cancelled)
 
     def active_tasks(self, chat_id: int | None = None) -> list[TaskEntry]:
         """Return in-flight task entries."""
@@ -382,6 +452,7 @@ class TaskHub:
                 model_override=entry.model or None,
                 provider_override=entry.provider or None,
                 chat_id=entry.chat_id,
+                topic_id=entry.thread_id,
                 process_label=f"task:{entry.task_id}",
                 timeout_seconds=timeout,
                 resume_session=resume_session,
@@ -399,17 +470,9 @@ class TaskHub:
             response = await cli.execute(request)
 
             elapsed = time.monotonic() - t0
-            if response.timed_out:
-                status = "failed"
-                error = f"Timeout after {timeout:.0f}s"
-            elif response.is_error:
-                status = "failed"
-                error = response.result or "CLI error"
-            else:
-                # If the task asked a question during this run, mark as waiting
-                inflight = self._in_flight.get(entry.task_id)
-                status = "waiting" if inflight and inflight.has_pending_question else "done"
-                error = ""
+            inflight = self._in_flight.get(entry.task_id)
+            has_pending = bool(inflight and inflight.has_pending_question)
+            status, error = _classify_task_response(response, timeout, has_pending)
 
             # Accumulate turns (resume adds to previous count)
             total_turns = entry.num_turns + response.num_turns
@@ -428,8 +491,10 @@ class TaskHub:
             result_text = response.result or ""
             session_id = response.session_id or ""
 
-            # Append TASKMEMORY.md content so the parent gets the full picture
-            if status == "done":
+            # Append TASKMEMORY.md content so the parent gets the full picture.
+            # Also include it on cancelled tasks (MED #1): partial work a
+            # sub-agent wrote before SIGTERM/SIGKILL must not be silently lost.
+            if status in {"done", "cancelled"}:
                 taskmemory = self._registry.taskmemory_path(entry.task_id)
                 result_text = _append_taskmemory(result_text, taskmemory)
 
@@ -468,6 +533,10 @@ class TaskHub:
                 completed_at=time.time(),
                 elapsed_seconds=elapsed,
             )
+            # MED #1: include any partial TASKMEMORY.md the sub-agent wrote
+            # before cancellation so the parent sees the progress, not silence.
+            taskmemory = self._registry.taskmemory_path(entry.task_id)
+            partial_text = _append_taskmemory("", taskmemory)
             with contextlib.suppress(Exception):
                 await self._deliver(
                     TaskResult(
@@ -476,7 +545,7 @@ class TaskHub:
                         parent_agent=entry.parent_agent,
                         name=entry.name,
                         prompt_preview=entry.prompt_preview,
-                        result_text="",
+                        result_text=partial_text,
                         status="cancelled",
                         elapsed_seconds=elapsed,
                         provider=entry.provider,
@@ -539,6 +608,28 @@ class TaskHub:
 
 _RESULT_PREVIEW_LEN = 200
 _TASKMEMORY_MAX_LEN = 4000
+# Exit codes that map to user-initiated cancel (SIGTERM=15, SIGKILL=9).
+# Subprocess module reports these as 128+signal (143/137) or negative signal (-15/-9).
+_CANCEL_RETURNCODES = frozenset({143, 137, -15, -9})
+
+
+def _classify_task_response(
+    response: object, timeout: float, has_pending_question: bool
+) -> tuple[str, str]:
+    """Map a CLIResponse to (status, error_message) for the task registry.
+
+    Exit 143/137 (= 128 + SIGTERM/SIGKILL) means kill_for_task terminated the
+    subprocess — surface as ``cancelled``, not ``failed``.
+    """
+    if getattr(response, "timed_out", False):
+        return "failed", f"Timeout after {timeout:.0f}s"
+    if getattr(response, "is_error", False):
+        if getattr(response, "returncode", None) in _CANCEL_RETURNCODES:
+            return "cancelled", ""
+        return "failed", getattr(response, "result", None) or "CLI error"
+    if has_pending_question:
+        return "waiting", ""
+    return "done", ""
 
 
 def _append_taskmemory(result_text: str, taskmemory_path: Path) -> str:
@@ -554,6 +645,22 @@ def _append_taskmemory(result_text: str, taskmemory_path: Path) -> str:
         return result_text
 
     if len(content) > _TASKMEMORY_MAX_LEN:
-        content = content[:_TASKMEMORY_MAX_LEN] + "\n[... truncated]"
+        # #91: make truncation visible -- silent truncation hid detailed
+        # research findings from the parent agent. Log a WARNING (for operators)
+        # AND emit a suffix that tells the parent agent the original length
+        # and the full file path so it can read the complete content on demand.
+        original_len = len(content)
+        logger.warning(
+            "TASKMEMORY truncated at %s: %d chars -> %d chars "
+            "(parent agent sees 'full content at' hint)",
+            taskmemory_path,
+            original_len,
+            _TASKMEMORY_MAX_LEN,
+        )
+        content = (
+            content[:_TASKMEMORY_MAX_LEN]
+            + f"\n[... truncated -- original was {original_len} chars. "
+            + f"Full content at: {taskmemory_path}]"
+        )
 
     return f"{result_text}\n\n---\nCONTENT FROM TASKMEMORY.MD ({taskmemory_path}):\n\n{content}"
